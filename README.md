@@ -93,8 +93,8 @@ LifeOS Task Orchestrator is a scalable, cloud-ready service that enables multi s
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/yourusername/lifeos-task-orchestrator.git
-cd lifeos-task-orchestrator
+git clone https://github.com/rubayetafsan/lifeos_task_orchestrator.git
+cd lifeos_task_orchestrator
 ```
 
 2. **Set up environment**
@@ -136,7 +136,7 @@ createdb lifeos
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
 ```
 
-## 📚 API Usage Examples
+## API Usage Examples
 
 ### Creating a Task
 
@@ -207,7 +207,7 @@ curl -X POST "http://localhost:8080/api/v1/workflows" \
 curl -X POST "http://localhost:8080/api/v1/workflows/{workflow_id}/execute"
 ```
 
-## ☁️ GCP Deployment
+## GCP Deployment
 
 ### Prerequisites
 
@@ -309,7 +309,7 @@ When deployed to Cloud Run, automatic metrics include:
 - Error rate
 - Container CPU/memory usage
 
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables
 
@@ -373,6 +373,7 @@ ruff app/ tests/
 Once running, visit:
 - Swagger UI: http://localhost:8080/docs
 - ReDoc: http://localhost:8080/redoc
+- Health: http://localhost:8080/api/v1/health
 
 ## Contributing
 
