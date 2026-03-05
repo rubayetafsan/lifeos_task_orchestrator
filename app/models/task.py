@@ -78,20 +78,20 @@ class Task(Base):
     max_retries: Mapped[int] = mapped_column(Integer, default=3)
     
     # Timing
-    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+
     # Metadata
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, 
-        default=datetime.utcnow, 
+        DateTime(timezone=False), 
+        default=lambda: datetime.utcnow().replace(tzinfo=None), 
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, 
-        default=datetime.utcnow, 
-        onupdate=datetime.utcnow, 
+        DateTime(timezone=False), 
+        default=lambda: datetime.utcnow().replace(tzinfo=None), 
+        onupdate=lambda: datetime.utcnow().replace(tzinfo=None), 
         nullable=False
     )
     
@@ -144,19 +144,19 @@ class Workflow(Base):
     output_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     
     # Timing
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=False), nullable=True)
+
     # Metadata
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, 
-        default=datetime.utcnow, 
+        DateTime(timezone=False), 
+        default=lambda: datetime.utcnow().replace(tzinfo=None), 
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, 
-        default=datetime.utcnow, 
-        onupdate=datetime.utcnow, 
+        DateTime(timezone=False), 
+        default=lambda: datetime.utcnow().replace(tzinfo=None), 
+        onupdate=lambda: datetime.utcnow().replace(tzinfo=None), 
         nullable=False
     )
     
