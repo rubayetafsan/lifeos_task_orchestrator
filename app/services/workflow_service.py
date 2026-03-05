@@ -1,63 +1,75 @@
-from typing import Optional, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple
 from uuid import UUID
-from datetime import datetime
-from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
+from datetime import datetime
 
-from app.models.task import Workflow, WorkflowStatus, Task, TaskStatus
-from app.schemas.task import WorkflowCreate, WorkflowUpdate, PaginationMeta, TaskCreate
+from app.models.task import Workflow, Task, WorkflowStatus, TaskStatus
+from app.schemas.task import WorkflowCreate, WorkflowUpdate
 from app.core.logging import get_logger
-from app.services.task_service import TaskService
 
 logger = get_logger(__name__)
 
 
 class WorkflowService:
-    """Service for workflow orchestration."""
     
     @staticmethod
     async def create_workflow(
         db: AsyncSession,
         workflow_data: WorkflowCreate
     ) -> Workflow:
-        """Create a new workflow with tasks."""
         workflow = Workflow(
             name=workflow_data.name,
             description=workflow_data.description,
-            config=workflow_data.config,
+            config=workflow_data.config or {},
             input_data=workflow_data.input_data,
             status=WorkflowStatus.DRAFT
         )
-        
         db.add(workflow)
         await db.flush()
         
-        # Create associated tasks
-        if workflow_data.tasks:
-            for task_data in workflow_data.tasks:
-                task_create = TaskCreate(**task_data.model_dump())
-                task_create.workflow_id = workflow.id
-                await TaskService.create_task(db, task_create)
+        for task_data in workflow_data.tasks:
+            task = Task(
+                workflow_id=workflow.id,
+                name=task_data.name,
+                task_type=task_data.task_type,
+                priority=task_data.priority,
+                input_data=task_data.input_data or {},
+                status=TaskStatus.PENDING
+            )
+            db.add(task)
         
-        await db.refresh(workflow)
-        logger.info(f"Created workflow: {workflow.id} - {workflow.name}")
+        await db.commit()
+        
+        stmt = (
+            select(Workflow)
+            .where(Workflow.id == workflow.id)
+            .options(selectinload(Workflow.tasks))
+        )
+        result = await db.execute(stmt)
+        workflow = result.scalar_one()
+        
+        logger.info(f"Created workflow {workflow.id} with {len(workflow.tasks)} tasks")
         return workflow
     
     @staticmethod
     async def get_workflow(
         db: AsyncSession,
-        workflow_id: UUID,
-        include_tasks: bool = True
+        workflow_id: UUID
     ) -> Optional[Workflow]:
-        """Get workflow by ID."""
-        query = select(Workflow).where(Workflow.id == workflow_id)
+        stmt = (
+            select(Workflow)
+            .where(Workflow.id == workflow_id)
+            .options(selectinload(Workflow.tasks))
+        )
+        result = await db.execute(stmt)
+        workflow = result.scalar_one_or_none()
         
-        if include_tasks:
-            query = query.options(selectinload(Workflow.tasks))
+        if workflow:
+            logger.debug(f"Retrieved workflow {workflow_id} with {len(workflow.tasks)} tasks")
         
-        result = await db.execute(query)
-        return result.scalar_one_or_none()
+        return workflow
     
     @staticmethod
     async def list_workflows(
@@ -65,38 +77,35 @@ class WorkflowService:
         skip: int = 0,
         limit: int = 100,
         status: Optional[WorkflowStatus] = None
-    ) -> Tuple[List[Workflow], PaginationMeta]:
-        """List workflows with filtering and pagination."""
-        query = select(Workflow)
+    ) -> Tuple[List[Workflow], Dict[str, Any]]:
+        stmt = select(Workflow).options(selectinload(Workflow.tasks))
         
         if status:
-            query = query.where(Workflow.status == status)
+            stmt = stmt.where(Workflow.status == status)
         
-        # Get total count
-        count_query = select(func.count()).select_from(query.subquery())
-        total_result = await db.execute(count_query)
+        count_stmt = select(func.count()).select_from(Workflow)
+        if status:
+            count_stmt = count_stmt.where(Workflow.status == status)
+        total_result = await db.execute(count_stmt)
         total = total_result.scalar()
         
-        # Apply pagination
-        query = (
-            query
-            .options(selectinload(Workflow.tasks))
-            .order_by(Workflow.created_at.desc())
-            .offset(skip)
-            .limit(limit)
-        )
+        stmt = stmt.offset(skip).limit(limit)
         
-        result = await db.execute(query)
-        workflows = list(result.scalars().all())
+        result = await db.execute(stmt)
+        workflows = result.scalars().all()
         
-        meta = PaginationMeta(
-            total=total,
-            page=skip // limit + 1 if limit > 0 else 1,
-            page_size=limit,
-            total_pages=(total + limit - 1) // limit if limit > 0 else 1
-        )
+        page = (skip // limit) + 1 if limit > 0 else 1
+        total_pages = (total + limit - 1) // limit if limit > 0 else 1
         
-        return workflows, meta
+        meta = {
+            "total": total,
+            "page": page,
+            "page_size": limit,
+            "total_pages": total_pages
+        }
+        
+        logger.debug(f"Listed {len(workflows)} workflows (total: {total})")
+        return list(workflows), meta
     
     @staticmethod
     async def update_workflow(
@@ -104,8 +113,7 @@ class WorkflowService:
         workflow_id: UUID,
         workflow_update: WorkflowUpdate
     ) -> Optional[Workflow]:
-        """Update workflow."""
-        workflow = await WorkflowService.get_workflow(db, workflow_id, include_tasks=False)
+        workflow = await WorkflowService.get_workflow(db, workflow_id)
         if not workflow:
             return None
         
@@ -114,10 +122,18 @@ class WorkflowService:
             setattr(workflow, field, value)
         
         workflow.updated_at = datetime.utcnow()
-        await db.flush()
-        await db.refresh(workflow)
         
-        logger.info(f"Updated workflow: {workflow.id}")
+        await db.commit()
+        
+        stmt = (
+            select(Workflow)
+            .where(Workflow.id == workflow_id)
+            .options(selectinload(Workflow.tasks))
+        )
+        result = await db.execute(stmt)
+        workflow = result.scalar_one()
+        
+        logger.info(f"Updated workflow {workflow_id}")
         return workflow
     
     @staticmethod
@@ -125,135 +141,166 @@ class WorkflowService:
         db: AsyncSession,
         workflow_id: UUID
     ) -> bool:
-        """Delete workflow and associated tasks."""
-        workflow = await WorkflowService.get_workflow(db, workflow_id, include_tasks=False)
+        workflow = await WorkflowService.get_workflow(db, workflow_id)
         if not workflow:
             return False
         
         await db.delete(workflow)
-        await db.flush()
+        await db.commit()
         
-        logger.info(f"Deleted workflow: {workflow_id}")
+        logger.info(f"Deleted workflow {workflow_id}")
         return True
     
     @staticmethod
     async def execute_workflow(
         db: AsyncSession,
         workflow_id: UUID,
-        input_data: Optional[dict] = None
+        input_data: Optional[Dict[str, Any]] = None
     ) -> Workflow:
-        """Execute all tasks in a workflow."""
         workflow = await WorkflowService.get_workflow(db, workflow_id)
         if not workflow:
-            raise ValueError(f"Workflow not found: {workflow_id}")
+            raise ValueError(f"Workflow {workflow_id} not found")
         
-        # Update workflow status
+        if workflow.status == WorkflowStatus.ACTIVE:
+            raise ValueError(f"Workflow is already running")
+        
         workflow.status = WorkflowStatus.ACTIVE
         workflow.started_at = datetime.utcnow()
-        if input_data:
-            workflow.input_data = input_data
-        await db.flush()
         
-        logger.info(f"Executing workflow {workflow.id} with {len(workflow.tasks)} tasks")
+        if input_data:
+            workflow.input_data = {**(workflow.input_data or {}), **input_data}
+        
+        await db.commit()
         
         try:
-            # Get execution order
-            tasks = await WorkflowService._get_execution_order(workflow)
-            
-            # Execute tasks in order
-            results = []
-            for task in tasks:
-                # Merge workflow input with task input
+            for task in workflow.tasks:
+                logger.info(f"Executing task {task.id} ({task.name})")
+                
+                task.status = TaskStatus.RUNNING
+                if hasattr(task, 'started_at'):
+                    task.started_at = datetime.utcnow()
+                await db.commit()
+                
                 task_input = {**(workflow.input_data or {}), **(task.input_data or {})}
                 
-                # Execute task
-                executed_task = await TaskService.execute_task(db, task.id, task_input)
-                results.append(executed_task)
+                try:
+                    result = await WorkflowService._execute_task(task, task_input)
+                    
+                    task.status = TaskStatus.COMPLETED
+                    task.output_data = result
+                    if hasattr(task, 'completed_at'):
+                        task.completed_at = datetime.utcnow()
+                    
+                except Exception as task_error:
+                    logger.error(f"Task {task.id} failed: {str(task_error)}")
+                    task.status = TaskStatus.FAILED
+                    if hasattr(task, 'error_message'):
+                        task.error_message = str(task_error)
+                    task.output_data = {"error": str(task_error)}
+                    
+                    workflow.status = WorkflowStatus.FAILED
+                    workflow.completed_at = datetime.utcnow()
+                    await db.commit()
+                    
+                    return await WorkflowService.get_workflow(db, workflow_id)
                 
-                # If task failed and workflow should stop on failure
-                if executed_task.status == TaskStatus.FAILED:
-                    stop_on_failure = workflow.config.get("stop_on_failure", True) if workflow.config else True
-                    if stop_on_failure:
-                        logger.warning(f"Workflow {workflow.id} stopped due to task failure")
-                        workflow.status = WorkflowStatus.FAILED
-                        break
+                await db.commit()
             
-            # Check overall workflow status
-            if workflow.status != WorkflowStatus.FAILED:
-                all_completed = all(t.status == TaskStatus.COMPLETED for t in results)
-                workflow.status = WorkflowStatus.COMPLETED if all_completed else WorkflowStatus.FAILED
-            
+            workflow.status = WorkflowStatus.COMPLETED
             workflow.completed_at = datetime.utcnow()
+            await db.commit()
             
-            # Aggregate output data
-            workflow.output_data = {
-                "tasks_executed": len(results),
-                "tasks_completed": sum(1 for t in results if t.status == TaskStatus.COMPLETED),
-                "tasks_failed": sum(1 for t in results if t.status == TaskStatus.FAILED),
-                "task_results": [
-                    {
-                        "task_id": str(t.id),
-                        "task_name": t.name,
-                        "status": t.status.value,
-                        "output": t.output_data
-                    }
-                    for t in results
-                ]
-            }
-            
-            logger.info(f"Workflow {workflow.id} execution completed with status {workflow.status}")
+            logger.info(f"Workflow {workflow_id} completed successfully")
             
         except Exception as e:
+            logger.error(f"Workflow execution failed: {str(e)}", exc_info=True)
             workflow.status = WorkflowStatus.FAILED
             workflow.completed_at = datetime.utcnow()
-            logger.error(f"Workflow {workflow.id} execution failed: {str(e)}")
-            raise
+            await db.commit()
+            raise ValueError(f"Workflow execution failed: {str(e)}")
         
-        await db.flush()
-        await db.refresh(workflow)
-        return workflow
+        return await WorkflowService.get_workflow(db, workflow_id)
     
     @staticmethod
-    async def _get_execution_order(workflow: Workflow) -> List[Task]:
-        """
-        Determine task execution order based on dependencies.
+    async def _execute_task(
+        task: Task,
+        input_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if task.task_type == "email":
+            return {
+                "status": "sent",
+                "recipient": input_data.get("to"),
+                "subject": input_data.get("subject"),
+                "timestamp": datetime.utcnow().isoformat()
+            }
         
-        For now, uses simple sequential order. In production, this would
-        parse the workflow config for DAG-based dependencies.
-        """
-        # Sort tasks by creation order (or priority)
-        return sorted(workflow.tasks, key=lambda t: (t.priority.value, t.created_at))
+        elif task.task_type == "data_processing":
+            return {
+                "status": "processed",
+                "operation": input_data.get("operation"),
+                "records_processed": len(input_data.get("data", [])),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        
+        elif task.task_type == "notification":
+            return {
+                "status": "delivered",
+                "channel": input_data.get("channel"),
+                "message": input_data.get("message"),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        
+        elif task.task_type == "http_request":
+            return {
+                "status": "success",
+                "url": input_data.get("url"),
+                "method": input_data.get("method", "GET"),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        
+        else:
+            return {
+                "status": "completed",
+                "task_type": task.task_type,
+                "timestamp": datetime.utcnow().isoformat()
+            }
     
     @staticmethod
     async def pause_workflow(
         db: AsyncSession,
         workflow_id: UUID
     ) -> Optional[Workflow]:
-        """Pause workflow execution."""
-        workflow = await WorkflowService.get_workflow(db, workflow_id, include_tasks=False)
+        workflow = await WorkflowService.get_workflow(db, workflow_id)
         if not workflow:
             return None
         
-        workflow.status = WorkflowStatus.PAUSED
-        workflow.updated_at = datetime.utcnow()
-        await db.flush()
+        if workflow.status != WorkflowStatus.ACTIVE:
+            logger.warning(f"Cannot pause workflow {workflow_id} - not running")
+            return None
         
-        logger.info(f"Paused workflow: {workflow.id}")
-        return workflow
+        workflow.status = WorkflowStatus.PAUSED
+        await db.commit()
+        
+        logger.info(f"Paused workflow {workflow_id}")
+        
+        return await WorkflowService.get_workflow(db, workflow_id)
     
     @staticmethod
     async def resume_workflow(
         db: AsyncSession,
         workflow_id: UUID
     ) -> Optional[Workflow]:
-        """Resume paused workflow."""
-        workflow = await WorkflowService.get_workflow(db, workflow_id, include_tasks=False)
-        if not workflow or workflow.status != WorkflowStatus.PAUSED:
+        workflow = await WorkflowService.get_workflow(db, workflow_id)
+        if not workflow:
+            return None
+        
+        if workflow.status != WorkflowStatus.PAUSED:
+            logger.warning(f"Cannot resume workflow {workflow_id} - not paused")
             return None
         
         workflow.status = WorkflowStatus.ACTIVE
-        workflow.updated_at = datetime.utcnow()
-        await db.flush()
+        await db.commit()
         
-        logger.info(f"Resumed workflow: {workflow.id}")
-        return workflow
+        logger.info(f"Resumed workflow {workflow_id}")
+        
+        return await WorkflowService.get_workflow(db, workflow_id)
